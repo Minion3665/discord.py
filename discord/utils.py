@@ -327,8 +327,11 @@ async def async_all(gen, *, check=_isawaitable):
             return False
     return True
 
-async def sane_wait_for(futures, *, timeout, loop):
-    done, pending = await asyncio.wait(futures, timeout=timeout, return_when=asyncio.ALL_COMPLETED, loop=loop)
+async def sane_wait_for(futures, *, timeout):
+    ensured = [
+        asyncio.ensure_future(fut) for fut in futures
+    ]
+    done, pending = await asyncio.wait(ensured, timeout=timeout, return_when=asyncio.ALL_COMPLETED)
 
     if len(pending) != 0:
         raise asyncio.TimeoutError()
@@ -438,7 +441,7 @@ def escape_markdown(text, *, as_needed=False, ignore_links=True):
     """
 
     if not as_needed:
-        url_regex = r'(?P<url>(?:https?|steam)://(?:-\.)?(?:[^\s/?\.#-]+\.?)+(?:/[^\s]*)?)'
+        url_regex = r'(?P<url><[^: >]+:\/[^ >]+>|(?:https?|steam):\/\/[^\s<]+[^<.,:;\"\'\]\s])'
         def replacement(match):
             groupdict = match.groupdict()
             is_url = groupdict.get('url')

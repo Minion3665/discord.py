@@ -33,11 +33,13 @@ import logging
 import math
 import weakref
 import inspect
+import gc
 
 from .guild import Guild
 from .activity import _ActivityTag
 from .user import User, ClientUser
-from .emoji import Emoji, PartialEmoji
+from .emoji import Emoji
+from .partial_emoji import PartialEmoji
 from .message import Message
 from .relationship import Relationship
 from .channel import *
@@ -116,6 +118,11 @@ class ConnectionState:
         # extra dict to look up private channels by user id
         self._private_channels_by_user = {}
         self._messages = self.max_messages and deque(maxlen=self.max_messages)
+
+        # In cases of large deallocations the GC should be called explicitly
+        # To free the memory more immediately, especially true when it comes
+        # to reconnect loops which cause mass allocations and deallocations.
+        gc.collect()
 
     def process_listeners(self, listener_type, argument, result):
         removed = []
@@ -210,6 +217,10 @@ class ConnectionState:
 
         del guild
 
+        # Much like clear(), if we have a massive deallocation
+        # then it's better to explicitly call the GC
+        gc.collect()
+
     @property
     def emojis(self):
         return list(self._emojis.values())
@@ -293,7 +304,7 @@ class ConnectionState:
         # wait for the chunks
         if chunks:
             try:
-                await utils.sane_wait_for(chunks, timeout=len(chunks) * 30.0, loop=self.loop)
+                await utils.sane_wait_for(chunks, timeout=len(chunks) * 30.0)
             except asyncio.TimeoutError:
                 log.info('Somehow timed out waiting for chunks.')
 
@@ -312,7 +323,7 @@ class ConnectionState:
         try:
             # start the query operation
             await ws.request_chunks(guild_id, query, limit)
-            members = await asyncio.wait_for(future, timeout=5.0, loop=self.loop)
+            members = await asyncio.wait_for(future, timeout=5.0)
 
             if cache:
                 for member in members:
@@ -333,7 +344,7 @@ class ConnectionState:
                     # this snippet of code is basically waiting 2 seconds
                     # until the last GUILD_CREATE was sent
                     launch.set()
-                    await asyncio.sleep(2, loop=self.loop)
+                    await asyncio.sleep(2)
 
             guilds = next(zip(*self._ready_state.guilds), [])
             if self._fetch_offline:
@@ -441,9 +452,9 @@ class ConnectionState:
             self.dispatch('raw_message_edit', raw)
 
     def parse_message_reaction_add(self, data):
-        emoji_data = data['emoji']
-        emoji_id = utils._get_as_snowflake(emoji_data, 'id')
-        emoji = PartialEmoji.with_state(self, animated=emoji_data['animated'], id=emoji_id, name=emoji_data['name'])
+        emoji = data['emoji']
+        emoji_id = utils._get_as_snowflake(emoji, 'id')
+        emoji = PartialEmoji.with_state(self, animated=emoji.get('animated', False), id=emoji_id, name=emoji['name'])
         raw = RawReactionActionEvent(data, emoji, 'REACTION_ADD')
         self.dispatch('raw_reaction_add', raw)
 
@@ -467,9 +478,9 @@ class ConnectionState:
             self.dispatch('reaction_clear', message, old_reactions)
 
     def parse_message_reaction_remove(self, data):
-        emoji_data = data['emoji']
-        emoji_id = utils._get_as_snowflake(emoji_data, 'id')
-        emoji = PartialEmoji.with_state(self, animated=emoji_data['animated'], id=emoji_id, name=emoji_data['name'])
+        emoji = data['emoji']
+        emoji_id = utils._get_as_snowflake(emoji, 'id')
+        emoji = PartialEmoji.with_state(self, animated=emoji.get('animated', False), id=emoji_id, name=emoji['name'])
         raw = RawReactionActionEvent(data, emoji, 'REACTION_REMOVE')
         self.dispatch('raw_reaction_remove', raw)
 
@@ -683,7 +694,7 @@ class ConnectionState:
         await self.chunker(guild)
         if chunks:
             try:
-                await utils.sane_wait_for(chunks, timeout=len(chunks), loop=self.loop)
+                await utils.sane_wait_for(chunks, timeout=len(chunks))
             except asyncio.TimeoutError:
                 log.info('Somehow timed out waiting for chunks.')
 
@@ -831,7 +842,9 @@ class ConnectionState:
         log.info('Processed a chunk for %s members in guild ID %s.', len(members), guild_id)
         if self._cache_members:
             for member in members:
-                guild._add_member(member)
+                existing = guild.get_member(member.id)
+                if existing is None or existing.joined_at is None:
+                    guild._add_member(member)
 
         self.process_listeners(ListenerType.chunk, guild, len(members))
         names = [x.name.lower() for x in members]
@@ -932,7 +945,7 @@ class ConnectionState:
         try:
             return self._emojis[emoji_id]
         except KeyError:
-            return PartialEmoji(animated=data['animated'], id=emoji_id, name=data['name'])
+            return PartialEmoji(animated=data.get('animated', False), id=emoji_id, name=data['name'])
 
     def _upgrade_partial_emoji(self, emoji):
         emoji_id = emoji.id
@@ -993,7 +1006,7 @@ class AutoShardedConnectionState(ConnectionState):
         # wait for the chunks
         if chunks:
             try:
-                await utils.sane_wait_for(chunks, timeout=len(chunks) * 30.0, loop=self.loop)
+                await utils.sane_wait_for(chunks, timeout=len(chunks) * 30.0)
             except asyncio.TimeoutError:
                 log.info('Somehow timed out waiting for chunks.')
 
@@ -1003,7 +1016,7 @@ class AutoShardedConnectionState(ConnectionState):
             # this snippet of code is basically waiting 2 seconds
             # until the last GUILD_CREATE was sent
             launch.set()
-            await asyncio.sleep(2.0 * self.shard_count, loop=self.loop)
+            await asyncio.sleep(2.0 * self.shard_count)
 
         if self._fetch_offline:
             guilds = sorted(self._ready_state.guilds, key=lambda g: g[0].shard_id)
